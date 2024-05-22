@@ -1,0 +1,157 @@
+variables:
+  - &when_test
+    - event: push
+      branch: test
+  - &when_live
+    - event: tag
+      ref: refs/tags/v*
+  - &build
+    - yarn
+    - yarn build:$${BUILD_ENV}
+    - mkdir -p $${APP_PATH}/source
+    - rm -rf $${APP_PATH}/source/*
+    - mkdir -p $${APP_PATH}/source/conf.d
+    - rm -rf $${APP_PATH}/source/conf.d/*
+    - cp -rf dist $${APP_PATH}/source
+    - cp -rf .deploy/default.conf $${APP_PATH}/source/conf.d/default.conf
+    - cp -rf .deploy/docker-compose.yml $${APP_PATH}/docker-compose.yml
+  - &publish
+    platforms: linux/amd64
+    repo: registry.cn-shenzhen.aliyuncs.com/sliwei/ci-test
+    registry: registry.cn-shenzhen.aliyuncs.com
+    dockerfile: .deploy/Dockerfile
+    username: wangxiaoshou666
+    password:
+      from_secret: docker_password
+  - &upload
+    image: chuangbo/ossutil
+    secrets: [ oss_access_key_id, oss_access_key_secret, oss_endpoint ]
+    commands:
+      - ls -la
+      - ossutil config -e $${OSS_ENDPOINT}.aliyuncs.com -i $${OSS_ACCESS_KEY_ID} -k $${OSS_ACCESS_KEY_SECRET}
+      - ossutil cp -rf dist/ oss://bstu/$${CI_REPO_NAME}/$${BUILD_ENV}/ -u
+  - &deploy
+    command_timeout: 10m
+    host: bstu.cn
+    username: root
+    key:
+      from_secret: id_rsa
+    port: 22
+    script_stop: false
+
+when:
+  - <<: *when_test
+  - <<: *when_live
+
+steps:
+  restore-cache:
+    image: meltwater/drone-cache
+    volumes:
+      - ci-test-cache:/tmp/cache
+    settings:
+      backend: "filesystem"
+      restore: true
+      mount:
+        - "node_modules"
+
+  build-test:
+    image: docker.io/node:18-alpine
+    environment:
+      - APP_PATH=/data/docker/awei/ci-test/test
+      - BUILD_ENV=test
+    volumes:
+      - /data/docker:/data/docker
+    commands:
+      - <<: *build
+    when: *when_test
+
+  build-live:
+    image: docker.io/node:18-alpine
+    environment:
+      - APP_PATH=/data/docker/awei/ci-test/live
+      - BUILD_ENV=live
+    volumes:
+      - /data/docker:/data/docker
+    commands:
+      - <<: *build
+    when: *when_live
+
+  rebuild-cache:
+    image: meltwater/drone-cache
+    volumes:
+      - ci-test-cache:/tmp/cache
+    settings:
+      backend: "filesystem"
+      rebuild: true
+      mount:
+        - "node_modules"
+  
+  upload-test:
+    environment:
+      - BUILD_ENV=test
+    <<: *upload
+    when: *when_test
+
+  upload-live:
+    environment:
+      - BUILD_ENV=live
+    <<: *upload
+    when: *when_live
+
+  publish-test:
+    image: woodpeckerci/plugin-docker-buildx
+    settings:
+      <<: *publish
+      tags: test-${CI_COMMIT_SHA:0:8}
+    when: *when_test
+
+  publish-live:
+    image: woodpeckerci/plugin-docker-buildx
+    settings:
+      <<: *publish
+      tags: ${CI_COMMIT_TAG}
+    when: *when_live
+
+  deploy-test:
+    image: appleboy/drone-ssh
+    environment:
+      - WORK_PATH=/data/docker/awei/ci-test/test
+    settings:
+      <<: *deploy
+      envs: [CI_COMMIT_SHA, WORK_PATH, CI_REPO_NAME]
+      script:
+        - cd $${WORK_PATH}
+        - export DOCKER_CONTAINER_NAME=$${CI_REPO_NAME}-test
+        - export DOCKER_IMAGE=test-$${CI_COMMIT_SHA:0:8}
+        - export ENV1=ENV1_test
+        - docker compose up -d
+        - docker compose restart
+    when: *when_test
+
+  deploy-live:
+    image: appleboy/drone-ssh
+    environment:
+      - WORK_PATH=/data/docker/awei/ci-test/live
+    settings:
+      <<: *deploy
+      envs: [CI_COMMIT_TAG, WORK_PATH, CI_REPO_NAME]
+      script:
+        - cd $${WORK_PATH}
+        - export DOCKER_CONTAINER_NAME=$${CI_REPO_NAME}
+        - export DOCKER_IMAGE=$${CI_COMMIT_TAG}
+        - export ENV1=ENV1_live
+        - docker compose up -d
+        - docker compose restart
+    when: *when_live
+
+  notify:
+    image: guoxudongdocker/drone-dingtalk:latest
+    settings:
+      message_color: true
+      message_pic: true
+      sha_link: true
+      token:
+        from_secret: dingtalk_token
+      type: markdown
+    when:
+      - status: [ success, failure ]

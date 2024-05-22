@@ -1,0 +1,13 @@
+http:
+  # 路由
+  routers:
+    router-ci-test-test:
+      rule: Host(`ci-test-test.bstu.cn`)
+      service: service-ci-test-test
+
+  # 服务
+  services:
+    service-ci-test-test:
+      loadBalancer:
+        servers:
+          - url: "http://ci-test-test:80"
